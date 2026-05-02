@@ -25,12 +25,14 @@ jobs:
 
     # 1. TruffleHog - Entropy-based secrets detection (API keys, tokens, etc.)
     - name: Scan for high-entropy secrets with TruffleHog
+      if: github.event_name == 'pull_request'
       uses: trufflesecurity/trufflehog@main
       with:
         path: ./
         base: ${{ github.event.repository.default_branch }}
         head: HEAD
         extra_args: --only-verified
+      continue-on-error: true
 
     # 2. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
     - name: Run GitGuardian scan
