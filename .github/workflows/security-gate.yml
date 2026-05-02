@@ -2,33 +2,175 @@ name: Security Scan Gate
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, develop, staging, dev]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, develop, staging, dev]
 
 jobs:
-  build:
+  security-scan:
     runs-on: ubuntu-latest
+    name: Security Gate Checks
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better detection
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
-    
-    - name: Install dependencies
+        python-version: '3.10'
+        cache: 'pip'
+
+    # 1. TruffleHog - Entropy-based secrets detection (API keys, tokens, etc.)
+    - name: Scan for high-entropy secrets with TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
+        extra_args: --only-verified
+
+    # 2. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
+    - name: Run GitGuardian scan
+      uses: GitGuardian/ggshield-action@master
+      env:
+        GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+      with:
+        args: --verbose --fail-on all
+
+    # 3. Semgrep - SAST (Static Application Security Testing)
+    - name: Run Semgrep security checks
+      uses: returntocorp/semgrep-action@v1
+      with:
+        generateSarif: true
+        config: >-
+          p/security-audit
+          p/owasp-top-ten
+          p/python
+        
+    # 4. Upload Semgrep results to GitHub Security
+    - name: Upload Semgrep SARIF
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: semgrep.sarif
+        category: semgrep
+
+    # 5. Custom detection for sensitive files
+    - name: Install dependencies for custom scan
       run: |
         python -m pip install --upgrade pip
-        pip install requests colorama
+        pip install requests colorama python-dotenv tqdm detect-secrets
 
-    - name: Run ShadowMapper Secret Scan
+    - name: Check if .gitignore properly excludes sensitive files
       run: |
-        # We will run custom unit tests to look for 'leaks' in our own code.
-        python -c "from core.wayback import grep_sensitive_urls; import os; \
-        files = [os.path.join(dp, f) for dp, dn, filenames in os.walk('.') for f in filenames if f.endswith('.py')]; \
-        content = [open(f).read() for f in files]; \
-        leaks = grep_sensitive_urls(content); \
-        if leaks: print(f'SECURITY ALERT: Found potential secrets in code!'); exit(1)"
+        python << 'EOF'
+        import os
+        import re
+        
+        sensitive_files = [
+            r'^\.env',
+            r'^\.env\.',
+            r'^\w+_secrets\.json',
+            r'^keys/',
+            r'^credentials/',
+            r'^\.ssh/',
+            r'\.pem$',
+            r'\.key$',
+            r'\.p12$',
+            r'\.pfx$'
+        ]
+        
+        untracked_sensitive = []
+        if os.path.exists('.gitignore'):
+            with open('.gitignore', 'r') as f:
+                gitignore_patterns = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        else:
+            gitignore_patterns = []
+        
+        tracked_files = [f for f, _ in [(root + '/' + file).lstrip('./'), 0] for root, _, files in os.walk('.') if root not in ['./.git', './.github', './.pytest_cache', './myenv'] for file in files]
+        
+        for file in tracked_files:
+            for pattern in sensitive_files:
+                if re.search(pattern, file):
+                    # Check if file is in gitignore
+                    is_ignored = any(re.match(p.replace('*', '.*').replace('.', r'\.'), file) for p in gitignore_patterns)
+                    if not is_ignored:
+                        untracked_sensitive.append(file)
+        
+        if untracked_sensitive:
+            print("[!] WARNING: Potential sensitive files tracked in git:")
+            for f in untracked_sensitive:
+                print(f"    - {f}")
+            exit(1)
+        else:
+            print("[+] No sensitive files found in git tracking")
+        EOF
+
+    - name: Run detect-secrets scan
+      run: |
+        detect-secrets scan --all-files --force-use-all-plugins --baseline .secrets.baseline
+      continue-on-error: true
+
+    - name: Run custom ShadowMapper security scan
+      run: |
+        python << 'EOF'
+        import os
+        import re
+        
+        # Patterns for common secrets detection
+        secret_patterns = {
+            'api_key': r'["\']?api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9]{20,}',
+            'aws_key': r'AKIA[0-9A-Z]{16}',
+            'private_key': r'-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY',
+            'db_connection': r'(postgres|mysql|mongodb)://[a-zA-Z0-9:@/\-_.~?]+',
+            'jwt_token': r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
+            'github_token': r'gh[pousr]_[A-Za-z0-9_]{36,255}',
+            'password_in_code': r'password\s*[:=]\s*["\'][^"\']{6,}["\']',
+            'env_var_exposed': r'export\s+\w+=["\'][^"\']{8,}["\']',
+        }
+        
+        exclude_dirs = {'.git', '.github', 'myenv', '.pytest_cache', 'node_modules', '.venv', '__pycache__'}
+        found_secrets = False
+        
+        for root, dirs, files in os.walk('.'):
+            # Remove excluded directories
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            
+            for file in files:
+                # Skip binary files dan large files
+                if file.endswith(('.pyc', '.so', '.dll', '.exe', '.bin', '.jpg', '.png', '.zip')):
+                    continue
+                
+                filepath = os.path.join(root, file)
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        
+                    for pattern_name, pattern in secret_patterns.items():
+                        if re.search(pattern, content, re.IGNORECASE):
+                            print(f"[!] SECURITY ALERT: Potential {pattern_name} found in {filepath}")
+                            found_secrets = True
+                except Exception as e:
+                    continue
+        
+        if found_secrets:
+            print("\n[!] FAILURE: Secrets detected! Do not push this code!")
+            exit(1)
+        else:
+            print("[+] Custom scan passed: No obvious secrets detected")
+        EOF
+
+    - name: Report security scan results
+      if: always()
+      run: |
+        echo "✅ Security Gate Checks Completed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✓ TruffleHog scan - High entropy secrets"
+        echo "✓ GitGuardian scan - Known signatures"
+        echo "✓ Semgrep SAST - Code vulnerabilities"
+        echo "✓ .gitignore validation - File tracking"
+        echo "✓ Custom pattern detection - Common secrets"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
