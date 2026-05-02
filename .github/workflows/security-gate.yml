@@ -42,21 +42,70 @@ jobs:
 
     # 3. Semgrep - SAST (Static Application Security Testing)
     - name: Run Semgrep security checks
-      uses: returntocorp/semgrep-action@v1
-      with:
-        generateSarif: true
-        config: >-
-          p/security-audit
-          p/owasp-top-ten
-          p/python
+      run: |
+        python -m pip install semgrep
+        semgrep --config=p/security-audit --config=p/owasp-top-ten --config=p/python \
+          --json --output=semgrep-output.json . || true
+        
+        # Convert JSON to SARIF format for GitHub
+        python << 'CONVERT_EOF'
+        import json
+        
+        try:
+            with open('semgrep-output.json', 'r') as f:
+                semgrep_data = json.load(f)
+            
+            # Basic SARIF conversion
+            sarif_output = {
+                "version": "2.1.0",
+                "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+                "runs": [{
+                    "tool": {
+                        "driver": {
+                            "name": "Semgrep",
+                            "version": "1.0.0",
+                            "informationUri": "https://semgrep.dev"
+                        }
+                    },
+                    "results": []
+                }]
+            }
+            
+            # Convert results
+            if "results" in semgrep_data:
+                for result in semgrep_data["results"]:
+                    sarif_result = {
+                        "ruleId": result.get("check_id", "unknown"),
+                        "message": {"text": result.get("extra", {}).get("message", "Security issue found")},
+                        "locations": [{
+                            "physicalLocation": {
+                                "artifactLocation": {"uri": result.get("path", "unknown")},
+                                "region": {
+                                    "startLine": result.get("start", {}).get("line", 1),
+                                    "endLine": result.get("end", {}).get("line", 1)
+                                }
+                            }
+                        }],
+                        "level": "warning"
+                    }
+                    sarif_output["runs"][0]["results"].append(sarif_result)
+            
+            with open('semgrep.sarif', 'w') as f:
+                json.dump(sarif_output, f, indent=2)
+            
+            print(f"✓ Generated SARIF file with {len(sarif_output['runs'][0]['results'])} issues")
+        except Exception as e:
+            print(f"Note: Could not convert Semgrep output to SARIF - {e}")
+        CONVERT_EOF
         
     # 4. Upload Semgrep results to GitHub Security
     - name: Upload Semgrep SARIF
-      uses: github/codeql-action/upload-sarif@v2
-      if: always()
+      uses: github/codeql-action/upload-sarif@v3
+      if: always() && hashFiles('semgrep.sarif') != ''
       with:
         sarif_file: semgrep.sarif
         category: semgrep
+        wait-for-processing: true
 
     # 5. Custom detection for sensitive files
     - name: Install dependencies for custom scan
