@@ -10,6 +10,9 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     name: Security Gate Checks
+    permissions:
+      security-events: write
+      contents: read
 
     steps:
     - name: Checkout code
@@ -103,8 +106,8 @@ jobs:
         
     # 4. Upload Semgrep results to GitHub Security
     - name: Upload Semgrep SARIF
-      uses: github/codeql-action/upload-sarif@v3
-      if: always() && hashFiles('semgrep.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v4
+      if: always() && hashFiles('semgrep.sarif') != '' && github.event_name != 'pull_request_target'
       with:
         sarif_file: semgrep.sarif
         category: semgrep
