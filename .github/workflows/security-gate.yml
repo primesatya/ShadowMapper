@@ -122,7 +122,7 @@ jobs:
 
     # 3. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
     - name: Run GitGuardian scan
-      if: secrets.GITGUARDIAN_API_KEY != ''
+      if: ${{ secrets.GITGUARDIAN_API_KEY }}
       uses: GitGuardian/ggshield-action@master
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
@@ -208,7 +208,7 @@ jobs:
       shell: bash
 
     - name: Run Snyk to check for vulnerabilities
-      if: secrets.SNYK_TOKEN != ''
+      if: ${{ secrets.SNYK_TOKEN }}
       uses: snyk/actions/python@v1
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
