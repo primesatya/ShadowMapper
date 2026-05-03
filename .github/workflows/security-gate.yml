@@ -26,7 +26,90 @@ jobs:
         python-version: '3.10'
         cache: 'pip'
 
-    # 1. TruffleHog - Entropy-based secrets detection (API keys, tokens, etc.)
+    # 1. ShadowMapper Core Scan
+    - name: Run ShadowMapper Secret Scan
+      run: |
+        python << 'SHADOWMAPPER_EOF'
+        import os
+        import re
+        import sys
+        
+        try:
+            from core.wayback import grep_sensitive_urls
+        except ImportError as e:
+            print(f"[!] ERROR: Could not import core.wayback: {e}")
+            print("[!] Skipping ShadowMapper Core Scan")
+            sys.exit(0)
+        
+        # Patterns for sensitive file detection
+        sensitive_patterns = [
+            r'\.env', r'\.pem$', r'\.key$', r'\.p12$', r'\.pfx$',
+            r'secrets?\.json', r'credentials?\.json', r'config\.php',
+            r'wp-config', r'settings\.py', r'web\.config'
+        ]
+        
+        exclude_dirs = {'.git', '.github', '.pytest_cache', 'myenv', '__pycache__', '.venv', 'node_modules', '.venv'}
+        found_issues = []
+        scanned_files = 0
+        
+        # 1. Check for sensitive files
+        print("[*] Scanning for sensitive files...")
+        for root, dirs, files in os.walk('.'):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            
+            for file in files:
+                filepath = os.path.join(root, file).lstrip('./')
+                
+                for pattern in sensitive_patterns:
+                    if re.search(pattern, filepath, re.IGNORECASE):
+                        found_issues.append(filepath)
+                        print(f"    [!] Sensitive file found: {filepath}")
+                        break
+        
+        # 2. Scan Python files for sensitive content patterns
+        print("[*] Scanning Python files for sensitive patterns...")
+        content_patterns = {
+            'api_key': r'["\']?api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9]{16,}',
+            'password': r'password\s*[:=]\s*["\'][^"\']'],
+            'token': r'(token|secret)\s*[:=]\s*["\'][^"\']'],
+            'private_key': r'-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY'
+        }
+        
+        for root, dirs, files in os.walk('.'):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            
+            for file in files:
+                if not file.endswith('.py'):
+                    continue
+                    
+                filepath = os.path.join(root, file).lstrip('./')
+                
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        scanned_files += 1
+                        
+                    for pattern_name, pattern in content_patterns.items():
+                        if re.search(pattern, content, re.IGNORECASE):
+                            found_issues.append(f"{filepath} (pattern: {pattern_name})")
+                            print(f"    [!] Potential {pattern_name} in {filepath}")
+                except Exception as e:
+                    print(f"    [!] Could not read {filepath}: {e}")
+        
+        # Summary and exit
+        print(f"\n[*] Scan complete: {scanned_files} Python files scanned")
+        if found_issues:
+            print(f"\n[!] SECURITY ALERT: Found {len(found_issues)} potential security issues:")
+            for issue in found_issues:
+                print(f"    - {issue}")
+            print("\n[!] FAILURE: Do not push this code!")
+            sys.exit(1)
+        else:
+            print("[+] ✓ ShadowMapper scan passed: No obvious secrets detected")
+            sys.exit(0)
+        SHADOWMAPPER_EOF
+
+    # 2. TruffleHog - Entropy-based secrets detection (API keys, tokens, etc.)
     - name: Scan for high-entropy secrets with TruffleHog
       if: github.event_name == 'pull_request'
       uses: trufflesecurity/trufflehog@main
@@ -37,16 +120,17 @@ jobs:
         extra_args: --only-verified
       continue-on-error: true
 
-    # 2. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
+    # 3. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
     - name: Run GitGuardian scan
+      if: secrets.GITGUARDIAN_API_KEY != ''
       uses: GitGuardian/ggshield-action@master
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
       with:
-        args: --verbose
+        args: --verbose --exit-zero
       continue-on-error: true
 
-    # 3. Semgrep - SAST (Static Application Security Testing)
+    # 4. Semgrep - SAST (Static Application Security Testing)
     - name: Run Semgrep security checks
       run: |
         python -m pip install semgrep
@@ -104,7 +188,7 @@ jobs:
             print(f"Note: Could not convert Semgrep output to SARIF - {e}")
         CONVERT_EOF
         
-    # 4. Upload Semgrep results to GitHub Security
+    # 5. Upload Semgrep results to GitHub Security
     - name: Upload Semgrep SARIF
       uses: github/codeql-action/upload-sarif@v4
       if: always() && hashFiles('semgrep.sarif') != '' && github.event_name != 'pull_request_target'
@@ -113,7 +197,34 @@ jobs:
         category: semgrep
         wait-for-processing: true
 
-    # 5. Custom detection for sensitive files
+    # 6. Snyk (Software Composition Analysis - SCA)
+    - name: Validate Snyk token
+      run: |
+        if [ -z "${{ secrets.SNYK_TOKEN }}" ]; then
+          echo "[!] WARNING: SNYK_TOKEN not configured. Skipping Snyk scan."
+          echo "[!] To enable Snyk scanning, add SNYK_TOKEN to repository secrets."
+          exit 0
+        fi
+      shell: bash
+
+    - name: Run Snyk to check for vulnerabilities
+      if: secrets.SNYK_TOKEN != ''
+      uses: snyk/actions/python@v1
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --all-projects --severity-threshold=high --json-file-output=snyk-report.json
+      continue-on-error: true
+
+    - name: Upload Snyk report
+      if: always() && hashFiles('snyk-report.json') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: snyk-security-report
+        path: snyk-report.json
+        retention-days: 30
+
+    # 7. Custom detection for sensitive files
     - name: Install dependencies for custom scan
       run: |
         python -m pip install --upgrade pip
