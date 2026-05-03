@@ -70,8 +70,8 @@ jobs:
         print("[*] Scanning Python files for sensitive patterns...")
         content_patterns = {
             'api_key': r'["\']?api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9]{16,}',
-            'password': r'password\s*[:=]\s*["\'][^"\']'],
-            'token': r'(token|secret)\s*[:=]\s*["\'][^"\']'],
+            'password': r'password\s*[:=]\s*["\'][^"\']+["\']',
+            'token': r'(token|secret)\s*[:=]\s*["\'][^"\']+["\']',
             'private_key': r'-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY'
         }
         
