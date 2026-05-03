@@ -122,7 +122,6 @@ jobs:
 
     # 3. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
     - name: Run GitGuardian scan
-      if: ${{ secrets.GITGUARDIAN_API_KEY }}
       uses: GitGuardian/ggshield-action@master
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
@@ -198,17 +197,7 @@ jobs:
         wait-for-processing: true
 
     # 6. Snyk (Software Composition Analysis - SCA)
-    - name: Validate Snyk token
-      run: |
-        if [ -z "${{ secrets.SNYK_TOKEN }}" ]; then
-          echo "[!] WARNING: SNYK_TOKEN not configured. Skipping Snyk scan."
-          echo "[!] To enable Snyk scanning, add SNYK_TOKEN to repository secrets."
-          exit 0
-        fi
-      shell: bash
-
     - name: Run Snyk to check for vulnerabilities
-      if: ${{ secrets.SNYK_TOKEN }}
       uses: snyk/actions/python@v1
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
