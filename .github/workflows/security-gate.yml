@@ -26,90 +26,7 @@ jobs:
         python-version: '3.10'
         cache: 'pip'
 
-    # 1. ShadowMapper Core Scan
-    - name: Run ShadowMapper Secret Scan
-      run: |
-        python << 'SHADOWMAPPER_EOF'
-        import os
-        import re
-        import sys
-        
-        try:
-            from core.wayback import grep_sensitive_urls
-        except ImportError as e:
-            print(f"[!] ERROR: Could not import core.wayback: {e}")
-            print("[!] Skipping ShadowMapper Core Scan")
-            sys.exit(0)
-        
-        # Patterns for sensitive file detection
-        sensitive_patterns = [
-            r'\.env', r'\.pem$', r'\.key$', r'\.p12$', r'\.pfx$',
-            r'secrets?\.json', r'credentials?\.json', r'config\.php',
-            r'wp-config', r'settings\.py', r'web\.config'
-        ]
-        
-        exclude_dirs = {'.git', '.github', '.pytest_cache', 'myenv', '__pycache__', '.venv', 'node_modules', '.venv'}
-        found_issues = []
-        scanned_files = 0
-        
-        # 1. Check for sensitive files
-        print("[*] Scanning for sensitive files...")
-        for root, dirs, files in os.walk('.'):
-            dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            
-            for file in files:
-                filepath = os.path.join(root, file).lstrip('./')
-                
-                for pattern in sensitive_patterns:
-                    if re.search(pattern, filepath, re.IGNORECASE):
-                        found_issues.append(filepath)
-                        print(f"    [!] Sensitive file found: {filepath}")
-                        break
-        
-        # 2. Scan Python files for sensitive content patterns
-        print("[*] Scanning Python files for sensitive patterns...")
-        content_patterns = {
-            'api_key': r'["\']?api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9]{16,}',
-            'password': r'password\s*[:=]\s*["\'][^"\']+["\']',
-            'token': r'(token|secret)\s*[:=]\s*["\'][^"\']+["\']',
-            'private_key': r'-----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY'
-        }
-        
-        for root, dirs, files in os.walk('.'):
-            dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            
-            for file in files:
-                if not file.endswith('.py'):
-                    continue
-                    
-                filepath = os.path.join(root, file).lstrip('./')
-                
-                try:
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        scanned_files += 1
-                        
-                    for pattern_name, pattern in content_patterns.items():
-                        if re.search(pattern, content, re.IGNORECASE):
-                            found_issues.append(f"{filepath} (pattern: {pattern_name})")
-                            print(f"    [!] Potential {pattern_name} in {filepath}")
-                except Exception as e:
-                    print(f"    [!] Could not read {filepath}: {e}")
-        
-        # Summary and exit
-        print(f"\n[*] Scan complete: {scanned_files} Python files scanned")
-        if found_issues:
-            print(f"\n[!] SECURITY ALERT: Found {len(found_issues)} potential security issues:")
-            for issue in found_issues:
-                print(f"    - {issue}")
-            print("\n[!] FAILURE: Do not push this code!")
-            sys.exit(1)
-        else:
-            print("[+] ✓ ShadowMapper scan passed: No obvious secrets detected")
-            sys.exit(0)
-        SHADOWMAPPER_EOF
-
-    # 2. TruffleHog - Entropy-based secrets detection (API keys, tokens, etc.)
+    # 1. TruffleHog - verified secrets only, blocks the merge
     - name: Scan for high-entropy secrets with TruffleHog
       if: github.event_name == 'pull_request'
       uses: trufflesecurity/trufflehog@main
@@ -118,76 +35,26 @@ jobs:
         base: ${{ github.event.repository.default_branch }}
         head: HEAD
         extra_args: --only-verified
-      continue-on-error: true
+      continue-on-error: false  # verified hits are high-confidence: never let these pass
 
-    # 3. GitGuardian - Entropy-based secrets detection (API keys, tokens, etc.)
+    # 2. GitGuardian - known signature scanning, blocks the merge
     - name: Run GitGuardian scan
+      if: github.actor != 'dependabot[bot]'  # skip bot PRs to avoid noise/quota burn
       uses: GitGuardian/ggshield-action@master
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
       with:
-        args: --verbose --exit-zero
-      continue-on-error: true
+        args: secret scan ci --verbose
+      continue-on-error: false
 
-    # 4. Semgrep - SAST (Static Application Security Testing)
+    # 3. Semgrep - SAST with native SARIF output
     - name: Run Semgrep security checks
       run: |
         python -m pip install semgrep
         semgrep --config=p/security-audit --config=p/owasp-top-ten --config=p/python \
-          --json --output=semgrep-output.json . || true
-        
-        # Convert JSON to SARIF format for GitHub
-        python << 'CONVERT_EOF'
-        import json
-        
-        try:
-            with open('semgrep-output.json', 'r') as f:
-                semgrep_data = json.load(f)
-            
-            # Basic SARIF conversion
-            sarif_output = {
-                "version": "2.1.0",
-                "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-                "runs": [{
-                    "tool": {
-                        "driver": {
-                            "name": "Semgrep",
-                            "version": "1.0.0",
-                            "informationUri": "https://semgrep.dev"
-                        }
-                    },
-                    "results": []
-                }]
-            }
-            
-            # Convert results
-            if "results" in semgrep_data:
-                for result in semgrep_data["results"]:
-                    sarif_result = {
-                        "ruleId": result.get("check_id", "unknown"),
-                        "message": {"text": result.get("extra", {}).get("message", "Security issue found")},
-                        "locations": [{
-                            "physicalLocation": {
-                                "artifactLocation": {"uri": result.get("path", "unknown")},
-                                "region": {
-                                    "startLine": result.get("start", {}).get("line", 1),
-                                    "endLine": result.get("end", {}).get("line", 1)
-                                }
-                            }
-                        }],
-                        "level": "warning"
-                    }
-                    sarif_output["runs"][0]["results"].append(sarif_result)
-            
-            with open('semgrep.sarif', 'w') as f:
-                json.dump(sarif_output, f, indent=2)
-            
-            print(f"✓ Generated SARIF file with {len(sarif_output['runs'][0]['results'])} issues")
-        except Exception as e:
-            print(f"Note: Could not convert Semgrep output to SARIF - {e}")
-        CONVERT_EOF
-        
-    # 5. Upload Semgrep results to GitHub Security
+          --sarif --output=semgrep.sarif . || true
+
+    # 4. Upload Semgrep results to GitHub Security
     - name: Upload Semgrep SARIF
       uses: github/codeql-action/upload-sarif@v4
       if: always() && hashFiles('semgrep.sarif') != '' && github.event_name != 'pull_request_target'
@@ -196,7 +63,7 @@ jobs:
         category: semgrep
         wait-for-processing: true
 
-    # 6. Snyk (Software Composition Analysis - SCA)
+    # 5. Snyk (SCA - Software Composition Analysis)
     - name: Run Snyk to check for vulnerabilities
       uses: snyk/actions/python@v1
       env:
@@ -213,18 +80,21 @@ jobs:
         path: snyk-report.json
         retention-days: 30
 
-    # 7. Custom detection for sensitive files
-    - name: Install dependencies for custom scan
+    # 6. detect-secrets - entropy/regex baseline scan
+    - name: Install detect-secrets
+      run: python -m pip install detect-secrets
+
+    - name: Run detect-secrets scan
       run: |
-        python -m pip install --upgrade pip
-        pip install requests colorama python-dotenv tqdm detect-secrets
+        detect-secrets scan --all-files --force-use-all-plugins --baseline .secrets.baseline
+      continue-on-error: true
 
     - name: Check if .gitignore properly excludes sensitive files
       run: |
         python << 'EOF'
         import os
         import re
-        
+
         sensitive_patterns = [
             r'\.env',
             r'\.pem$',
@@ -235,22 +105,21 @@ jobs:
             r'credentials\.json',
             r'_secrets\.json',
         ]
-        
+
         exclude_dirs = {'.git', '.github', '.pytest_cache', 'myenv', '__pycache__', '.venv', 'node_modules'}
         untracked_sensitive = []
-        
-        # Scan all files in repo
+
         for root, dirs, files in os.walk('.'):
             dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            
+
             for file in files:
                 filepath = os.path.join(root, file).lstrip('./')
-                
+
                 for pattern in sensitive_patterns:
                     if re.search(pattern, filepath, re.IGNORECASE):
                         untracked_sensitive.append(filepath)
                         break
-        
+
         if untracked_sensitive:
             print("[!] WARNING: Potential sensitive files found:")
             for f in untracked_sensitive:
@@ -260,18 +129,20 @@ jobs:
             print("[+] No obvious sensitive files found")
         EOF
 
-    - name: Run detect-secrets scan
-      run: |
-        detect-secrets scan --all-files --force-use-all-plugins --baseline .secrets.baseline
-      continue-on-error: true
-
-    - name: Run custom ShadowMapper security scan
+    # 7. Consolidated ShadowMapper secret & sensitive-file scan (the hard gate)
+    - name: Run Consolidated ShadowMapper Security Scan
       run: |
         python << 'EOF'
         import os
         import re
-        
-        # Patterns for common secrets detection
+        import sys
+
+        sensitive_patterns = [
+            r'\.env', r'\.pem$', r'\.key$', r'\.p12$', r'\.pfx$',
+            r'secrets?\.json', r'credentials?\.json', r'config\.php',
+            r'wp-config', r'settings\.py', r'web\.config'
+        ]
+
         secret_patterns = {
             'api_key': r'["\']?api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9]{20,}',
             'aws_key': r'AKIA[0-9A-Z]{16}',
@@ -282,46 +153,51 @@ jobs:
             'password_in_code': r'password\s*[:=]\s*["\'][^"\']{6,}["\']',
             'env_var_exposed': r'export\s+\w+=["\'][^"\']{8,}["\']',
         }
-        
-        exclude_dirs = {'.git', '.github', 'myenv', '.pytest_cache', 'node_modules', '.venv', '__pycache__'}
-        found_secrets = False
-        
+
+        exclude_dirs = {'.git', '.github', '.pytest_cache', 'myenv', '__pycache__', '.venv', 'node_modules'}
+        found_issues = []
+
+        print("[*] Launching ShadowMapper Consolidated Scan...")
         for root, dirs, files in os.walk('.'):
-            # Remove excluded directories
             dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            
             for file in files:
-                # Skip binary files dan large files
                 if file.endswith(('.pyc', '.so', '.dll', '.exe', '.bin', '.jpg', '.png', '.zip')):
                     continue
-                
-                filepath = os.path.join(root, file)
+                filepath = os.path.join(root, file).lstrip('./')
+
+                for pattern in sensitive_patterns:
+                    if re.search(pattern, filepath, re.IGNORECASE):
+                        found_issues.append(f"Sensitive File: {filepath}")
+                        print(f"    [!] Sensitive file found: {filepath}")
+                        break
+
                 try:
                     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
-                        
-                    for pattern_name, pattern in secret_patterns.items():
-                        if re.search(pattern, content, re.IGNORECASE):
-                            print(f"[!] SECURITY ALERT: Potential {pattern_name} found in {filepath}")
-                            found_secrets = True
-                except Exception as e:
+                except Exception:
                     continue
-        
-        if found_secrets:
-            print("\n[!] FAILURE: Secrets detected! Do not push this code!")
-            exit(1)
-        else:
-            print("[+] Custom scan passed: No obvious secrets detected")
+
+                for pattern_name, pattern in secret_patterns.items():
+                    if re.search(pattern, content, re.IGNORECASE):
+                        found_issues.append(f"Exposed {pattern_name} in {filepath}")
+                        print(f"    [!] Potential {pattern_name} in {filepath}")
+
+        if found_issues:
+            print(f"\n[!] FAILURE: {len(found_issues)} security issues detected!")
+            sys.exit(1)
+        print("[+] ShadowMapper verification passed.")
         EOF
 
     - name: Report security scan results
       if: always()
       run: |
-        echo "✅ Security Gate Checks Completed"
+        echo "Security Gate Checks Completed"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "✓ TruffleHog scan - High entropy secrets"
-        echo "✓ GitGuardian scan - Known signatures"
-        echo "✓ Semgrep SAST - Code vulnerabilities"
-        echo "✓ .gitignore validation - File tracking"
-        echo "✓ Custom pattern detection - Common secrets"
+        echo "[gate]  TruffleHog        - verified high-entropy secrets (blocking)"
+        echo "[gate]  GitGuardian       - known leaked-secret signatures (blocking)"
+        echo "[gate]  ShadowMapper scan - sensitive files & secret patterns (blocking)"
+        echo "[info]  Semgrep SAST      - code vulnerabilities (uploaded to Security tab)"
+        echo "[info]  Snyk SCA          - dependency vulnerabilities (uploaded as artifact)"
+        echo "[info]  detect-secrets    - baseline secret scan"
+        echo "[info]  .gitignore check  - sensitive filename tracking"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
