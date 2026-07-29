@@ -38,14 +38,20 @@ jobs:
       continue-on-error: false  # verified hits are high-confidence: never let these pass
 
     # 2. GitGuardian - known signature scanning, blocks the merge
-    - name: Run GitGuardian scan
+    - name: Install and run GitGuardian ggshield
       if: github.actor != 'dependabot[bot]'  # skip bot PRs to avoid noise/quota burn
-      uses: GitGuardian/ggshield-action@v1
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
-      with:
-        args: secret scan ci --verbose
-      continue-on-error: false
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install ggshield==1.19.0
+        ggshield --version
+        if ggshield secret scan ci --verbose; then
+          echo "[+] ggshield secret scan succeeded"
+        else
+          echo "[!] Primary ggshield command failed, trying alternate syntax"
+          ggshield scan secret ci --verbose
+        fi
 
     # 3. Semgrep - SAST with native SARIF output
     - name: Run Semgrep security checks
