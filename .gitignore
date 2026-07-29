@@ -38,6 +38,9 @@ htmlcov/
 Thumbs.db
 *.log
 
+# Report output
+report/
+
 # Database files (for local testing)
 *.db
 *.sqlite
