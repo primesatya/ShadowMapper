@@ -44,7 +44,7 @@ jobs:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
       run: |
         python -m pip install --upgrade pip
-        python -m pip install ggshield==1.19.0
+        python -m pip install ggshield==1.53.0
         ggshield --version
         if ggshield secret scan ci --verbose; then
           echo "[+] ggshield secret scan succeeded"
