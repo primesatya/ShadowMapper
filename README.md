@@ -69,7 +69,6 @@ python main.py
 
 ## 📦 Installation
 
-## 📦 Installation
 
 ### 📋 Prerequisites
 
@@ -101,7 +100,6 @@ pip install -r requirements.txt
 
 ## 💻 Usage
 
-## 💻 Usage
 
 ### 🎯 Basic Command
 
@@ -180,7 +178,6 @@ Input target domain (eg: target.com): example.com
 
 ## 🏗️ Project Structure
 
-## 🏗️ Project Structure
 
 ```
 ShadowMapper/
@@ -250,7 +247,6 @@ See the [Security Gate workflow](https://github.com/primesatya/ShadowMapper/acti
 
 ## ⚠️ Error Handling
 
-## ⚠️ Error Handling
 
 The tool includes robust error handling for common scenarios:
 
