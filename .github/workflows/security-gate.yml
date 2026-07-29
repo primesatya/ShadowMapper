@@ -40,11 +40,11 @@ jobs:
     # 2. GitGuardian - known signature scanning, blocks the merge
     - name: Run GitGuardian scan
       if: github.actor != 'dependabot[bot]'  # skip bot PRs to avoid noise/quota burn
-      uses: GitGuardian/ggshield-action@master
+      uses: GitGuardian/ggshield-action@v1
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
       with:
-        args: secret scan ci --verbose
+        args: scan secret ci --verbose
       continue-on-error: false
 
     # 3. Semgrep - SAST with native SARIF output
