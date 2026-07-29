@@ -44,7 +44,7 @@ jobs:
       env:
         GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
       with:
-        args: scan secret ci --verbose
+        args: secret scan ci --verbose
       continue-on-error: false
 
     # 3. Semgrep - SAST with native SARIF output
